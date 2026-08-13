@@ -1,0 +1,46 @@
+name: codexs-verify
+
+on:
+  pull_request:
+    branches:
+      - codexs/main
+  push:
+    branches:
+      - codexs/main
+      - feature/**
+      - upgrade/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: go-verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build Linux binary
+        run: CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -buildvcs=false -o /tmp/CLIProxyAPI ./cmd/server
+
+      - name: Build container image
+        run: |
+          docker build \
+            --build-arg VERSION="${GITHUB_REF_NAME}" \
+            --build-arg COMMIT="${GITHUB_SHA}" \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -t cli-proxy-api:ci .
