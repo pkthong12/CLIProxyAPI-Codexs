@@ -129,6 +129,19 @@ type XAIConfig struct {
 type AntigravityConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+	// ModelCatalog configures the opt-in Codexs Antigravity model discovery catalog.
+	ModelCatalog AntigravityModelCatalogConfig `yaml:"model-catalog,omitempty" json:"model-catalog,omitempty"`
+}
+
+// AntigravityModelCatalogConfig configures local discovery of Antigravity model metadata.
+// Discovery never exposes models publicly until a separate verification phase approves them.
+type AntigravityModelCatalogConfig struct {
+	// Enabled starts the discovery worker. The default is false.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// SnapshotPath stores the redacted local discovery snapshot.
+	SnapshotPath string `yaml:"snapshot-path,omitempty" json:"snapshot-path,omitempty"`
+	// RefreshInterval controls how frequently discovery runs, for example "6h".
+	RefreshInterval string `yaml:"refresh-interval,omitempty" json:"refresh-interval,omitempty"`
 }
 
 // CodexConfig configures provider-wide Codex request behavior.

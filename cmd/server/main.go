@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/codexs/antigravitycatalog"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
@@ -677,7 +678,7 @@ func main() {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				misc.StartAntigravityVersionUpdater(context.Background())
-				startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
+				startModelCatalogUpdaters(localModel, cfg, configFilePath)
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
 				log.AddHook(hook)
@@ -751,7 +752,7 @@ func main() {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
-			startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
+			startModelCatalogUpdaters(localModel, cfg, configFilePath)
 			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
 		}
 	}
@@ -767,15 +768,35 @@ func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCo
 	return !homeEnabled, true
 }
 
-func startModelCatalogUpdaters(localModel, homeEnabled bool) {
-	startModels, startCodexClient := modelCatalogUpdaterPlan(localModel, homeEnabled)
+func startModelCatalogUpdaters(localModel bool, cfg *config.Config, configFilePath string) {
+	if cfg == nil {
+		return
+	}
+	startModels, startCodexClient := modelCatalogUpdaterPlan(localModel, cfg.Home.Enabled)
 	if startCodexClient {
 		registry.StartCodexClientModelsUpdater(context.Background())
 	}
 	if startModels {
 		registry.StartModelsUpdater(context.Background())
-	} else if homeEnabled {
+	} else if cfg.Home.Enabled {
 		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
+	}
+	startCodexsAntigravityModelCatalog(cfg, configFilePath)
+}
+
+func startCodexsAntigravityModelCatalog(cfg *config.Config, configFilePath string) {
+	if cfg == nil || !cfg.Antigravity.ModelCatalog.Enabled {
+		return
+	}
+	errStart := antigravitycatalog.Start(context.Background(), antigravitycatalog.StartOptions{
+		Enabled:         true,
+		AuthDirectory:   cfg.AuthDir,
+		SnapshotPath:    cfg.Antigravity.ModelCatalog.SnapshotPath,
+		RefreshInterval: cfg.Antigravity.ModelCatalog.RefreshInterval,
+		BaseDirectory:   filepath.Dir(configFilePath),
+	})
+	if errStart != nil {
+		log.Errorf("failed to start Codexs Antigravity model discovery: %v", errStart)
 	}
 }
 

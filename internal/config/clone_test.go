@@ -30,6 +30,28 @@ func TestParseConfigBytes_AntigravitySensitiveWords(t *testing.T) {
 	}
 }
 
+func TestParseConfigBytes_AntigravityModelCatalog(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`
+antigravity:
+  model-catalog:
+    enabled: true
+    snapshot-path: state/catalog.json
+    refresh-interval: 8h
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if cfg == nil || !cfg.Antigravity.ModelCatalog.Enabled {
+		t.Fatal("Antigravity model catalog was not enabled")
+	}
+	if cfg.Antigravity.ModelCatalog.SnapshotPath != "state/catalog.json" {
+		t.Fatalf("snapshot path = %q", cfg.Antigravity.ModelCatalog.SnapshotPath)
+	}
+	if cfg.Antigravity.ModelCatalog.RefreshInterval != "8h" {
+		t.Fatalf("refresh interval = %q", cfg.Antigravity.ModelCatalog.RefreshInterval)
+	}
+}
+
 func TestCloneForRuntimeDeepCopiesConfig(t *testing.T) {
 	cfg := sampleCloneRuntimeConfig()
 

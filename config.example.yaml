@@ -264,6 +264,10 @@ codex:
 #   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions
 #     - "API"
 #     - "proxy"
+#   model-catalog:               # Codexs discovery only; candidates are not exposed through public APIs
+#     enabled: false
+#     snapshot-path: "antigravity-model-catalog.json"
+#     refresh-interval: "6h"
 
 # xAI provider behavior.
 xai:
