@@ -819,6 +819,11 @@ func TestGetPluginSyncCancellationInterruptsRead(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var startOnce sync.Once
+	var releaseOnce sync.Once
+	releaseServer := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	defer releaseServer()
 	client, commands := newRedisCommandTestClient(t, func(args []string) string {
 		if len(args) >= 2 && args[1] == redisKeyPluginSync {
 			startOnce.Do(func() { close(started) })
@@ -832,10 +837,25 @@ func TestGetPluginSyncCancellationInterruptsRead(t *testing.T) {
 		cancel()
 	}()
 	startedAt := time.Now()
-	_, errSync := client.GetPluginSync(ctx, pluginstore.PluginSyncRequest{
-		SchemaVersion: pluginstore.PluginSyncSchemaVersion, GOOS: "linux", GOARCH: "amd64",
-	})
-	close(release)
+	result := make(chan error, 1)
+	go func() {
+		_, errSync := client.GetPluginSync(ctx, pluginstore.PluginSyncRequest{
+			SchemaVersion: pluginstore.PluginSyncSchemaVersion, GOOS: "linux", GOARCH: "amd64",
+		})
+		result <- errSync
+	}()
+	var errSync error
+	select {
+	case errSync = <-result:
+	case <-time.After(time.Second):
+		releaseServer()
+		select {
+		case <-result:
+		case <-time.After(time.Second):
+			t.Fatal("GetPluginSync() did not return after releasing the test server")
+		}
+		t.Fatal("GetPluginSync() cancellation did not interrupt the read")
+	}
 	if !errors.Is(errSync, context.Canceled) {
 		t.Fatalf("GetPluginSync() error = %v, want context.Canceled", errSync)
 	}
