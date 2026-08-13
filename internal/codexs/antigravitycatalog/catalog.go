@@ -4,6 +4,8 @@ package antigravitycatalog
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,7 +16,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -23,11 +28,12 @@ import (
 )
 
 const (
-	DEFAULT_REFRESH_INTERVAL = 6 * time.Hour
-	DEFAULT_SNAPSHOT_FILE    = "antigravity-model-catalog.json"
-	MAX_RESPONSE_BYTES       = 4 << 20
-	MODEL_CATALOG_VERSION    = 1
-	ANTIGRAVITY_PROVIDER     = "antigravity"
+	DEFAULT_REFRESH_INTERVAL  = 6 * time.Hour
+	DEFAULT_SNAPSHOT_FILE     = "antigravity-model-catalog.json"
+	DEFAULT_MAX_VERIFICATIONS = 1
+	MAX_RESPONSE_BYTES        = 4 << 20
+	MODEL_CATALOG_VERSION     = 1
+	ANTIGRAVITY_PROVIDER      = "antigravity"
 )
 
 var antigravityCatalogBaseURLs = []string{
@@ -48,11 +54,14 @@ const (
 
 // StartOptions contains the local-only discovery worker settings.
 type StartOptions struct {
-	Enabled         bool
-	AuthDirectory   string
-	SnapshotPath    string
-	RefreshInterval string
-	BaseDirectory   string
+	Enabled                bool
+	VerifyEnabled          bool
+	MaxVerificationsPerRun int
+	AuthDirectory          string
+	SnapshotPath           string
+	RefreshInterval        string
+	BaseDirectory          string
+	Config                 *config.Config
 }
 
 // DiscoveredModel contains upstream model metadata that is safe to persist.
@@ -66,16 +75,17 @@ type DiscoveredModel struct {
 
 // CatalogModel is a discovered model plus its verification lifecycle state.
 type CatalogModel struct {
-	ID                  string            `json:"id"`
-	DisplayName         string            `json:"display_name"`
-	ContextLength       int               `json:"context_length,omitempty"`
-	MaxCompletionTokens int               `json:"max_completion_tokens,omitempty"`
-	SupportsWebSearch   bool              `json:"supports_web_search,omitempty"`
-	State               VerificationState `json:"state"`
-	LastSeenAt          time.Time         `json:"last_seen_at"`
-	LastVerifiedAt      time.Time         `json:"last_verified_at,omitempty"`
-	LastRejectedAt      time.Time         `json:"last_rejected_at,omitempty"`
-	VerificationError   string            `json:"verification_error,omitempty"`
+	ID                      string            `json:"id"`
+	DisplayName             string            `json:"display_name"`
+	ContextLength           int               `json:"context_length,omitempty"`
+	MaxCompletionTokens     int               `json:"max_completion_tokens,omitempty"`
+	SupportsWebSearch       bool              `json:"supports_web_search,omitempty"`
+	State                   VerificationState `json:"state"`
+	LastSeenAt              time.Time         `json:"last_seen_at"`
+	LastVerifiedAt          time.Time         `json:"last_verified_at,omitempty"`
+	LastRejectedAt          time.Time         `json:"last_rejected_at,omitempty"`
+	VerificationError       string            `json:"verification_error,omitempty"`
+	VerifiedAuthFingerprint string            `json:"verified_auth_fingerprint,omitempty"`
 }
 
 // Snapshot contains the redacted local catalog state.
@@ -97,18 +107,27 @@ type IAuthLoader interface {
 	Load(context.Context, string) ([]*coreauth.Auth, error)
 }
 
+// IModelVerifier verifies a candidate through the native Antigravity request path.
+type IModelVerifier interface {
+	Verify(context.Context, *config.Config, *coreauth.Auth, string) error
+}
+
 type catalogService struct {
 	settings   catalogSettings
 	fetcher    IFetcher
 	authLoader IAuthLoader
+	verifier   IModelVerifier
 	store      snapshotStore
 	now        func() time.Time
 }
 
 type catalogSettings struct {
-	authDirectory   string
-	snapshotPath    string
-	refreshInterval time.Duration
+	authDirectory          string
+	snapshotPath           string
+	refreshInterval        time.Duration
+	verifyEnabled          bool
+	maxVerificationsPerRun int
+	config                 *config.Config
 }
 
 type snapshotStore struct {
@@ -118,6 +137,8 @@ type snapshotStore struct {
 type fileAuthLoader struct{}
 
 type upstreamFetcher struct{}
+
+type nativeModelVerifier struct{}
 
 type antigravityModelsResponse struct {
 	Models            map[string]antigravityModelResponse `json:"models"`
@@ -147,6 +168,7 @@ func Start(pContext context.Context, pOptions StartOptions) error {
 		settings:   settings,
 		fetcher:    upstreamFetcher{},
 		authLoader: fileAuthLoader{},
+		verifier:   nativeModelVerifier{},
 		store:      snapshotStore{path: settings.snapshotPath},
 		now:        time.Now,
 	}
@@ -167,18 +189,31 @@ func parseSettings(pOptions StartOptions) (catalogSettings, error) {
 		}
 		refreshInterval = parsedInterval
 	}
-	snapshotPath := strings.TrimSpace(pOptions.SnapshotPath)
+	snapshotPath := ResolveSnapshotPath(pOptions.BaseDirectory, pOptions.SnapshotPath)
+	maxVerifications := pOptions.MaxVerificationsPerRun
+	if maxVerifications <= 0 {
+		maxVerifications = DEFAULT_MAX_VERIFICATIONS
+	}
+	return catalogSettings{
+		authDirectory:          resolvedAuthDirectory,
+		snapshotPath:           snapshotPath,
+		refreshInterval:        refreshInterval,
+		verifyEnabled:          pOptions.VerifyEnabled,
+		maxVerificationsPerRun: maxVerifications,
+		config:                 pOptions.Config,
+	}, nil
+}
+
+// ResolveSnapshotPath returns the stable on-disk path for a catalog snapshot.
+func ResolveSnapshotPath(pBaseDirectory, pSnapshotPath string) string {
+	snapshotPath := strings.TrimSpace(pSnapshotPath)
 	if snapshotPath == "" {
 		snapshotPath = DEFAULT_SNAPSHOT_FILE
 	}
 	if !filepath.IsAbs(snapshotPath) {
-		snapshotPath = filepath.Join(pOptions.BaseDirectory, snapshotPath)
+		snapshotPath = filepath.Join(pBaseDirectory, snapshotPath)
 	}
-	return catalogSettings{
-		authDirectory:   resolvedAuthDirectory,
-		snapshotPath:    filepath.Clean(snapshotPath),
-		refreshInterval: refreshInterval,
-	}, nil
+	return filepath.Clean(snapshotPath)
 }
 
 func (s *catalogService) run(pContext context.Context) {
@@ -202,6 +237,7 @@ func (s *catalogService) refresh(pContext context.Context) {
 		log.WithError(errLoad).Error("Codexs Antigravity catalog snapshot is unavailable")
 		return
 	}
+	previousModels := append([]CatalogModel(nil), snapshot.Models...)
 	snapshot.LastAttemptAt = s.now().UTC()
 	auth, errAuth := s.loadAuth(pContext)
 	if errAuth != nil {
@@ -213,14 +249,67 @@ func (s *catalogService) refresh(pContext context.Context) {
 		s.saveFailure(snapshot, errFetch)
 		return
 	}
-	snapshot.Models = mergeModels(snapshot.Models, models, s.now().UTC())
+	now := s.now().UTC()
+	snapshot.Models = mergeModels(snapshot.Models, models, now)
+	if s.settings.verifyEnabled {
+		s.verifyPendingModels(pContext, &snapshot, auth, now)
+	}
 	snapshot.LastSuccessfulAt = s.now().UTC()
 	snapshot.LastError = ""
 	if errSave := s.store.save(snapshot); errSave != nil {
 		log.WithError(errSave).Error("Codexs Antigravity catalog snapshot save failed")
 		return
 	}
+	if hasEffectiveModelChange(previousModels, snapshot.Models) {
+		registry.NotifyModelRefresh([]string{ANTIGRAVITY_PROVIDER})
+	}
 	log.WithField("model_count", len(models)).Info("Codexs Antigravity model discovery completed")
+}
+
+func (s *catalogService) verifyPendingModels(pContext context.Context, pSnapshot *Snapshot, pAuth *coreauth.Auth, pNow time.Time) {
+	if pSnapshot == nil || pAuth == nil {
+		return
+	}
+	verifiedAuthFingerprint := AuthFingerprint(pAuth)
+	verifiedCount := 0
+	for index := range pSnapshot.Models {
+		if verifiedCount >= s.settings.maxVerificationsPerRun {
+			return
+		}
+		model := &pSnapshot.Models[index]
+		if model.State != VerificationStatePending {
+			continue
+		}
+		errVerify := s.verifier.Verify(pContext, s.settings.config, pAuth, model.ID)
+		updateVerificationResult(model, verifiedAuthFingerprint, pNow, errVerify)
+		verifiedCount++
+	}
+}
+
+func (nativeModelVerifier) Verify(pContext context.Context, pConfig *config.Config, pAuth *coreauth.Auth, pModelID string) error {
+	return executor.VerifyAntigravityModel(pContext, pConfig, pAuth, pModelID)
+}
+
+func updateVerificationResult(pModel *CatalogModel, pAuthFingerprint string, pNow time.Time, pError error) {
+	if pModel == nil {
+		return
+	}
+	if pError == nil {
+		pModel.State = VerificationStateVerified
+		pModel.LastVerifiedAt = pNow
+		pModel.VerifiedAuthFingerprint = pAuthFingerprint
+		pModel.VerificationError = ""
+		return
+	}
+	statusError, hasStatus := pError.(interface{ StatusCode() int })
+	if hasStatus && statusError.StatusCode() == http.StatusNotFound {
+		pModel.State = VerificationStateRejected
+		pModel.LastRejectedAt = pNow
+		pModel.VerifiedAuthFingerprint = ""
+		pModel.VerificationError = "model not found"
+		return
+	}
+	pModel.VerificationError = "verification unavailable"
 }
 
 func (s *catalogService) saveFailure(pSnapshot Snapshot, pCause error) {
@@ -405,6 +494,10 @@ func mergeModels(pExisting []CatalogModel, pDiscovered []DiscoveredModel, pNow t
 		model.LastSeenAt = pNow
 		if model.State == VerificationStateStale {
 			model.State = VerificationStatePending
+			model.LastVerifiedAt = time.Time{}
+			model.LastRejectedAt = time.Time{}
+			model.VerifiedAuthFingerprint = ""
+			model.VerificationError = ""
 		}
 		models = append(models, model)
 		seenModels[model.ID] = true
@@ -419,6 +512,66 @@ func mergeModels(pExisting []CatalogModel, pDiscovered []DiscoveredModel, pNow t
 	sort.Slice(models, func(pLeft, pRight int) bool {
 		return models[pLeft].ID < models[pRight].ID
 	})
+	return models
+}
+
+func hasEffectiveModelChange(pBefore, pAfter []CatalogModel) bool {
+	if len(pBefore) != len(pAfter) {
+		return true
+	}
+	beforeByID := make(map[string]CatalogModel, len(pBefore))
+	for _, model := range pBefore {
+		beforeByID[model.ID] = model
+	}
+	for _, model := range pAfter {
+		previous, exists := beforeByID[model.ID]
+		if !exists || previous.DisplayName != model.DisplayName || previous.ContextLength != model.ContextLength || previous.MaxCompletionTokens != model.MaxCompletionTokens || previous.SupportsWebSearch != model.SupportsWebSearch || previous.State != model.State || previous.VerifiedAuthFingerprint != model.VerifiedAuthFingerprint {
+			return true
+		}
+	}
+	return false
+}
+
+// AuthFingerprint returns a stable non-reversible credential identity for local snapshots.
+func AuthFingerprint(pAuth *coreauth.Auth) string {
+	if pAuth == nil {
+		return ""
+	}
+	identity := strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(pAuth.Provider)),
+		strings.TrimSpace(pAuth.ID),
+		strings.TrimSpace(pAuth.FileName),
+	}, "|")
+	if identity == "||" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(identity))
+	return hex.EncodeToString(digest[:])
+}
+
+// LoadVerifiedModels returns only models verified with the supplied credential.
+func LoadVerifiedModels(pSnapshotPath string, pAuth *coreauth.Auth) []DiscoveredModel {
+	fingerprint := AuthFingerprint(pAuth)
+	if fingerprint == "" {
+		return nil
+	}
+	snapshot, errLoad := (snapshotStore{path: pSnapshotPath}).load()
+	if errLoad != nil {
+		return nil
+	}
+	models := make([]DiscoveredModel, 0, len(snapshot.Models))
+	for _, model := range snapshot.Models {
+		if model.State != VerificationStateVerified || model.VerifiedAuthFingerprint != fingerprint {
+			continue
+		}
+		models = append(models, DiscoveredModel{
+			ID:                  model.ID,
+			DisplayName:         model.DisplayName,
+			ContextLength:       model.ContextLength,
+			MaxCompletionTokens: model.MaxCompletionTokens,
+			SupportsWebSearch:   model.SupportsWebSearch,
+		})
+	}
 	return models
 }
 

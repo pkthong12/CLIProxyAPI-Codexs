@@ -2,10 +2,12 @@ package cliproxy
 
 import (
 	"context"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/codexs/antigravitycatalog"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -102,6 +104,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "antigravity":
 		models = registry.GetAntigravityModels()
 		models = applyAntigravityFetchedModelCapabilities(models, s.fetchAntigravityModelCapabilityHintsForAuth(ctx, a))
+		models = s.appendVerifiedAntigravityCatalogModels(models, a)
 		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
@@ -277,6 +280,47 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	}
 
 	GlobalModelRegistry().UnregisterClient(a.ID)
+}
+
+func (s *Service) appendVerifiedAntigravityCatalogModels(pModels []*ModelInfo, pAuth *coreauth.Auth) []*ModelInfo {
+	if s == nil || s.cfg == nil || !s.cfg.Antigravity.ModelCatalog.ExposeVerified {
+		return pModels
+	}
+	snapshotPath := antigravitycatalog.ResolveSnapshotPath(filepath.Dir(s.configPath), s.cfg.Antigravity.ModelCatalog.SnapshotPath)
+	verifiedModels := antigravitycatalog.LoadVerifiedModels(snapshotPath, pAuth)
+	if len(verifiedModels) == 0 {
+		return pModels
+	}
+	existingModelIDs := make(map[string]struct{}, len(pModels))
+	for _, model := range pModels {
+		if model != nil {
+			existingModelIDs[strings.ToLower(strings.TrimSpace(model.ID))] = struct{}{}
+		}
+	}
+	for _, model := range verifiedModels {
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		key := strings.ToLower(modelID)
+		if _, exists := existingModelIDs[key]; exists {
+			continue
+		}
+		pModels = append(pModels, &ModelInfo{
+			ID:                  modelID,
+			Object:              "model",
+			OwnedBy:             "antigravity",
+			Type:                "antigravity",
+			DisplayName:         model.DisplayName,
+			Name:                modelID,
+			Description:         model.DisplayName,
+			ContextLength:       model.ContextLength,
+			MaxCompletionTokens: model.MaxCompletionTokens,
+			SupportsWebSearch:   model.SupportsWebSearch,
+		})
+		existingModelIDs[key] = struct{}{}
+	}
+	return pModels
 }
 
 // refreshModelRegistrationForAuth re-applies the latest model registration for

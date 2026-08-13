@@ -138,6 +138,12 @@ type AntigravityConfig struct {
 type AntigravityModelCatalogConfig struct {
 	// Enabled starts the discovery worker. The default is false.
 	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// VerifyEnabled permits rate-limited upstream verification for discovered candidates.
+	VerifyEnabled bool `yaml:"verify-enabled,omitempty" json:"verify-enabled,omitempty"`
+	// ExposeVerified permits only verified candidates to be registered for their verified credential.
+	ExposeVerified bool `yaml:"expose-verified,omitempty" json:"expose-verified,omitempty"`
+	// MaxVerificationsPerRun limits upstream verification requests per discovery cycle.
+	MaxVerificationsPerRun int `yaml:"max-verifications-per-run,omitempty" json:"max-verifications-per-run,omitempty"`
 	// SnapshotPath stores the redacted local discovery snapshot.
 	SnapshotPath string `yaml:"snapshot-path,omitempty" json:"snapshot-path,omitempty"`
 	// RefreshInterval controls how frequently discovery runs, for example "6h".

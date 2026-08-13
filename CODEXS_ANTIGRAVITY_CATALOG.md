@@ -27,6 +27,13 @@ antigravity:
 `refresh-interval` must be a positive Go duration. If `snapshot-path` is
 relative, it is resolved against the directory containing `config.yaml`.
 
+`verify-enabled` is a separate opt-in. When enabled, one minimal native
+`generateContent` request is made for each pending candidate up to
+`max-verifications-per-run` (default: `1`). Only a successful response marks a
+candidate as `verified`. A 404 marks it `rejected`; other failures such as rate
+limits leave it pending. `expose-verified` is a second opt-in and only exposes
+models verified by the exact same credential fingerprint.
+
 The worker selects the first enabled Antigravity auth file that already has an
 access token. It does not refresh tokens, modify auth files, or copy any
 credential data into the snapshot. A missing or expired usable credential leaves
@@ -38,10 +45,9 @@ The snapshot is local-only and written with restrictive file permissions. It
 contains only model metadata and these states:
 
 - `pending_verification`: newly discovered or reappeared model; never public.
-- `verified`: reserved for the future canary verifier; eligible for a later
-  registry integration.
-- `rejected`: reserved for a model that failed a controlled verification
-  request; never public.
+- `verified`: passed one controlled native request and is eligible for public
+  registration only when `expose-verified` is enabled.
+- `rejected`: received a 404 from a controlled verification request; never public.
 - `stale`: model was absent from the latest successful discovery response;
   never public unless it is rediscovered and verified again.
 

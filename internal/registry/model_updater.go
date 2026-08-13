@@ -263,6 +263,11 @@ func notifyModelRefresh(changedProviders []string) {
 	cb(changedProviders)
 }
 
+// NotifyModelRefresh re-registers affected provider models through the active service callback.
+func NotifyModelRefresh(changedProviders []string) {
+	notifyModelRefresh(mergeProviderNames(nil, changedProviders))
+}
+
 func mergeProviderNames(existing, incoming []string) []string {
 	if len(incoming) == 0 {
 		return existing

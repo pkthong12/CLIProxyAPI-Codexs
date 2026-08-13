@@ -789,11 +789,14 @@ func startCodexsAntigravityModelCatalog(cfg *config.Config, configFilePath strin
 		return
 	}
 	errStart := antigravitycatalog.Start(context.Background(), antigravitycatalog.StartOptions{
-		Enabled:         true,
-		AuthDirectory:   cfg.AuthDir,
-		SnapshotPath:    cfg.Antigravity.ModelCatalog.SnapshotPath,
-		RefreshInterval: cfg.Antigravity.ModelCatalog.RefreshInterval,
-		BaseDirectory:   filepath.Dir(configFilePath),
+		Enabled:                true,
+		VerifyEnabled:          cfg.Antigravity.ModelCatalog.VerifyEnabled,
+		MaxVerificationsPerRun: cfg.Antigravity.ModelCatalog.MaxVerificationsPerRun,
+		AuthDirectory:          cfg.AuthDir,
+		SnapshotPath:           cfg.Antigravity.ModelCatalog.SnapshotPath,
+		RefreshInterval:        cfg.Antigravity.ModelCatalog.RefreshInterval,
+		BaseDirectory:          filepath.Dir(configFilePath),
+		Config:                 cfg,
 	})
 	if errStart != nil {
 		log.Errorf("failed to start Codexs Antigravity model discovery: %v", errStart)

@@ -266,6 +266,9 @@ codex:
 #     - "proxy"
 #   model-catalog:               # Codexs discovery only; candidates are not exposed through public APIs
 #     enabled: false
+#     verify-enabled: false       # sends one minimal native request per pending candidate; keep disabled until canary-tested
+#     expose-verified: false      # makes verified candidates available only to the credential that verified them
+#     max-verifications-per-run: 1
 #     snapshot-path: "antigravity-model-catalog.json"
 #     refresh-interval: "6h"
 

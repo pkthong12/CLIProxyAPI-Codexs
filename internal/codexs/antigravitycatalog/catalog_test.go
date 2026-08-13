@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
@@ -24,6 +25,14 @@ func (f staticFetcher) Fetch(_ context.Context, _ *coreauth.Auth) ([]DiscoveredM
 type staticAuthLoader struct {
 	auths []*coreauth.Auth
 	err   error
+}
+
+type staticModelVerifier struct {
+	err error
+}
+
+func (v staticModelVerifier) Verify(_ context.Context, _ *config.Config, _ *coreauth.Auth, _ string) error {
+	return v.err
 }
 
 func (l staticAuthLoader) Load(_ context.Context, _ string) ([]*coreauth.Auth, error) {
@@ -146,6 +155,68 @@ func TestRefreshKeepsExistingSnapshotWhenFetchFails(t *testing.T) {
 	}
 	if snapshot.LastError == "" {
 		t.Fatal("LastError is empty after failed discovery")
+	}
+}
+
+func TestRefreshVerifiesPendingModelForSelectedCredential(t *testing.T) {
+	temporaryDirectory := t.TempDir()
+	snapshotPath := filepath.Join(temporaryDirectory, "catalog.json")
+	now := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	auth := &coreauth.Auth{
+		ID:       "selected-auth",
+		Provider: ANTIGRAVITY_PROVIDER,
+		Metadata: map[string]interface{}{"access_token": "token", "project_id": "project"},
+	}
+	service := catalogService{
+		settings: catalogSettings{
+			snapshotPath:           snapshotPath,
+			verifyEnabled:          true,
+			maxVerificationsPerRun: 1,
+		},
+		fetcher:    staticFetcher{models: []DiscoveredModel{{ID: "gemini-verified", DisplayName: "Verified"}}},
+		authLoader: staticAuthLoader{auths: []*coreauth.Auth{auth}},
+		verifier:   staticModelVerifier{},
+		store:      snapshotStore{path: snapshotPath},
+		now:        func() time.Time { return now },
+	}
+
+	service.refresh(context.Background())
+	snapshot, errLoad := service.store.load()
+	if errLoad != nil {
+		t.Fatalf("load snapshot: %v", errLoad)
+	}
+	if len(snapshot.Models) != 1 || snapshot.Models[0].State != VerificationStateVerified {
+		t.Fatalf("snapshot models = %+v, want verified model", snapshot.Models)
+	}
+	if snapshot.Models[0].VerifiedAuthFingerprint != AuthFingerprint(auth) {
+		t.Fatalf("verified auth fingerprint = %q", snapshot.Models[0].VerifiedAuthFingerprint)
+	}
+}
+
+func TestLoadVerifiedModelsFiltersByCredentialFingerprint(t *testing.T) {
+	temporaryDirectory := t.TempDir()
+	snapshotPath := filepath.Join(temporaryDirectory, "catalog.json")
+	verifiedAuth := &coreauth.Auth{ID: "verified-auth", Provider: ANTIGRAVITY_PROVIDER}
+	otherAuth := &coreauth.Auth{ID: "other-auth", Provider: ANTIGRAVITY_PROVIDER}
+	store := snapshotStore{path: snapshotPath}
+	fixture := Snapshot{
+		Version: MODEL_CATALOG_VERSION,
+		Models: []CatalogModel{{
+			ID:                      "gemini-verified",
+			DisplayName:             "Verified",
+			State:                   VerificationStateVerified,
+			VerifiedAuthFingerprint: AuthFingerprint(verifiedAuth),
+		}},
+	}
+	if errSave := store.save(fixture); errSave != nil {
+		t.Fatalf("save fixture snapshot: %v", errSave)
+	}
+	if models := LoadVerifiedModels(snapshotPath, otherAuth); len(models) != 0 {
+		t.Fatalf("other credential models = %+v, want none", models)
+	}
+	models := LoadVerifiedModels(snapshotPath, verifiedAuth)
+	if len(models) != 1 || models[0].ID != "gemini-verified" {
+		t.Fatalf("verified credential models = %+v", models)
 	}
 }
 

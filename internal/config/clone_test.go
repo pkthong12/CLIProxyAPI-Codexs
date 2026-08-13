@@ -35,6 +35,9 @@ func TestParseConfigBytes_AntigravityModelCatalog(t *testing.T) {
 antigravity:
   model-catalog:
     enabled: true
+    verify-enabled: true
+    expose-verified: true
+    max-verifications-per-run: 2
     snapshot-path: state/catalog.json
     refresh-interval: 8h
 `))
@@ -43,6 +46,12 @@ antigravity:
 	}
 	if cfg == nil || !cfg.Antigravity.ModelCatalog.Enabled {
 		t.Fatal("Antigravity model catalog was not enabled")
+	}
+	if !cfg.Antigravity.ModelCatalog.VerifyEnabled || !cfg.Antigravity.ModelCatalog.ExposeVerified {
+		t.Fatal("Antigravity model catalog verification flags were not enabled")
+	}
+	if cfg.Antigravity.ModelCatalog.MaxVerificationsPerRun != 2 {
+		t.Fatalf("max verifications per run = %d", cfg.Antigravity.ModelCatalog.MaxVerificationsPerRun)
 	}
 	if cfg.Antigravity.ModelCatalog.SnapshotPath != "state/catalog.json" {
 		t.Fatalf("snapshot path = %q", cfg.Antigravity.ModelCatalog.SnapshotPath)
