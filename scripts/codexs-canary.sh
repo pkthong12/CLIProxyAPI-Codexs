@@ -11,6 +11,8 @@ EXPECTED_MODEL="${EXPECTED_MODEL:-}"
 CANARY_PORT="${CANARY_PORT:-18318}"
 CANARY_NAME="${CANARY_NAME:-cli-proxy-codexs-canary}"
 STARTUP_ATTEMPTS="${STARTUP_ATTEMPTS:-45}"
+CATALOG_SNAPSHOT="${CANARY_CATALOG_SNAPSHOT:-}"
+CATALOG_ATTEMPTS="${CANARY_CATALOG_ATTEMPTS:-$STARTUP_ATTEMPTS}"
 
 if [[ ! -f "$CONFIG_FILE" || ! -f "$API_KEY_FILE" || ! -d "$AUTH_DIRECTORY" ]]; then
   printf '%s\n' 'Canary config, API-key file, or auth directory is unavailable.' >&2
@@ -23,6 +25,22 @@ API_KEY="$(tr -d '\r\n' < "$API_KEY_FILE")"
 cleanup() {
   docker rm -f "$CANARY_NAME" >/dev/null 2>&1 || true
 }
+
+wait_for_catalog_snapshot() {
+  local attempt
+  for ((attempt = 1; attempt <= CATALOG_ATTEMPTS; attempt++)); do
+    if docker cp "$CANARY_NAME:$CATALOG_SNAPSHOT" - 2>/dev/null | tar -xO 2>/dev/null | jq -e '.last_successful_at != null' >/dev/null; then
+      return 0
+    fi
+    if (( attempt == CATALOG_ATTEMPTS )); then
+      docker logs "$CANARY_NAME" >&2 || true
+      printf '%s\n' 'Catalog snapshot did not complete.' >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 trap cleanup EXIT
 
 docker run -d \
@@ -52,6 +70,10 @@ MODELS_RESPONSE="$(curl --fail --silent --show-error \
   "http://127.0.0.1:${CANARY_PORT}/v1/models")"
 
 printf '%s\n' "$MODELS_RESPONSE" | jq -e '.data | type == "array"' >/dev/null
+
+if [[ -n "$CATALOG_SNAPSHOT" ]]; then
+  wait_for_catalog_snapshot
+fi
 
 if [[ -n "$EXPECTED_MODEL" ]]; then
   printf '%s\n' "$MODELS_RESPONSE" | jq -e --arg model "$EXPECTED_MODEL" \

@@ -271,19 +271,26 @@ func (s *catalogService) verifyPendingModels(pContext context.Context, pSnapshot
 		return
 	}
 	verifiedAuthFingerprint := AuthFingerprint(pAuth)
-	verifiedCount := 0
-	for index := range pSnapshot.Models {
-		if verifiedCount >= s.settings.maxVerificationsPerRun {
+	for index, model := range pendingModelsForVerification(pSnapshot.Models) {
+		if index >= s.settings.maxVerificationsPerRun {
 			return
-		}
-		model := &pSnapshot.Models[index]
-		if model.State != VerificationStatePending {
-			continue
 		}
 		errVerify := s.verifier.Verify(pContext, s.settings.config, pAuth, model.ID)
 		updateVerificationResult(model, verifiedAuthFingerprint, pNow, errVerify)
-		verifiedCount++
 	}
+}
+
+func pendingModelsForVerification(pModels []CatalogModel) []*CatalogModel {
+	pendingModels := make([]*CatalogModel, 0, len(pModels))
+	for index := range pModels {
+		if pModels[index].State == VerificationStatePending {
+			pendingModels = append(pendingModels, &pModels[index])
+		}
+	}
+	sort.SliceStable(pendingModels, func(pLeft, pRight int) bool {
+		return strings.TrimSpace(pendingModels[pLeft].VerificationError) == "" && strings.TrimSpace(pendingModels[pRight].VerificationError) != ""
+	})
+	return pendingModels
 }
 
 func (nativeModelVerifier) Verify(pContext context.Context, pConfig *config.Config, pAuth *coreauth.Auth, pModelID string) error {

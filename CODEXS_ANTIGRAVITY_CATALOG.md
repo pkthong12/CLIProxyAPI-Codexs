@@ -57,6 +57,9 @@ Before adding any discovered model to the public registry:
 
 1. Run the candidate image using `scripts/codexs-canary.sh` with read-only
    production auth mounts and isolated state.
+   Set `CANARY_CATALOG_SNAPSHOT` to the in-container snapshot path (normally
+   `/app/data/antigravity-model-catalog.json`) so the canary waits for the
+   first discovery cycle without weakening the snapshot's `0600` permissions.
 2. Perform one rate-limited minimal upstream generation request for the exact
    raw model ID.
 3. Persist only its state and sanitized error category; do not persist prompts,

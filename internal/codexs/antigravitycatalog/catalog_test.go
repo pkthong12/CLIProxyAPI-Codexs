@@ -35,6 +35,15 @@ func (v staticModelVerifier) Verify(_ context.Context, _ *config.Config, _ *core
 	return v.err
 }
 
+type recordingModelVerifier struct {
+	verifiedModelIDs []string
+}
+
+func (v *recordingModelVerifier) Verify(_ context.Context, _ *config.Config, _ *coreauth.Auth, pModelID string) error {
+	v.verifiedModelIDs = append(v.verifiedModelIDs, pModelID)
+	return nil
+}
+
 func (l staticAuthLoader) Load(_ context.Context, _ string) ([]*coreauth.Auth, error) {
 	return l.auths, l.err
 }
@@ -190,6 +199,24 @@ func TestRefreshVerifiesPendingModelForSelectedCredential(t *testing.T) {
 	}
 	if snapshot.Models[0].VerifiedAuthFingerprint != AuthFingerprint(auth) {
 		t.Fatalf("verified auth fingerprint = %q", snapshot.Models[0].VerifiedAuthFingerprint)
+	}
+}
+
+func TestVerifyPendingModelsPrioritizesUntriedModels(t *testing.T) {
+	verifier := &recordingModelVerifier{}
+	service := catalogService{
+		settings: catalogSettings{maxVerificationsPerRun: 1},
+		verifier: verifier,
+	}
+	snapshot := &Snapshot{Models: []CatalogModel{
+		{ID: "retry-first", State: VerificationStatePending, VerificationError: "verification unavailable"},
+		{ID: "untried-second", State: VerificationStatePending},
+	}}
+
+	service.verifyPendingModels(context.Background(), snapshot, &coreauth.Auth{ID: "auth", Provider: ANTIGRAVITY_PROVIDER}, time.Now())
+
+	if len(verifier.verifiedModelIDs) != 1 || verifier.verifiedModelIDs[0] != "untried-second" {
+		t.Fatalf("verified models = %v, want untried-second", verifier.verifiedModelIDs)
 	}
 }
 
