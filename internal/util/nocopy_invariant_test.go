@@ -101,6 +101,8 @@ type reviewedInPlaceByteWrite struct {
 }
 
 var reviewedInPlaceByteWrites = map[string]reviewedInPlaceByteWrite{
+	"internal/home/client.go":                               {1, "clears a private Redis response buffer after parsing; no no-copy GJSON result escapes"},
+	"internal/pluginstore/auth.go":                          {1, "clears a freshly allocated basic-auth credential buffer after base64 encoding"},
 	"internal/runtime/executor/claude_signing.go":           {2, "writes CCH digits into bytes.Clone(body); the caller's body is never touched"},
 	"internal/runtime/executor/claude_executor_cloaking.go": {1, "shifts []string headers to prepend a block; no byte of any payload is rewritten"},
 	"internal/runtime/executor/claude_executor_request.go":  {2, "shifts []string headers to insert a part; no byte of any payload is rewritten"},
