@@ -34,10 +34,16 @@ candidate as `verified`. A 404 marks it `rejected`; other failures such as rate
 limits leave it pending. `expose-verified` is a second opt-in and only exposes
 models verified by the exact same credential fingerprint.
 
-The worker selects the first enabled Antigravity auth file that already has an
-access token. It does not refresh tokens, modify auth files, or copy any
-credential data into the snapshot. A missing or expired usable credential leaves
-the last successful snapshot unchanged and writes a generic failure status.
+The worker scans every enabled Antigravity auth file that already has an access
+token. It merges the safely returned raw model IDs, records only irreversible
+credential fingerprints, and verifies a candidate using a credential that
+advertised it. A successful verification exposes the model only for that exact
+credential. A transient fetch failure for one credential does not unpublish a
+model previously advertised by that credential.
+
+The worker does not refresh tokens, modify auth files, or copy credential data
+into the snapshot. If every usable credential fetch fails, it leaves the last
+successful snapshot unchanged and writes a generic failure status.
 
 ## Snapshot lifecycle
 
@@ -46,7 +52,7 @@ contains only model metadata and these states:
 
 - `pending_verification`: newly discovered or reappeared model; never public.
 - `verified`: passed one controlled native request and is eligible for public
-  registration only when `expose-verified` is enabled.
+  registration only for the same credential when `expose-verified` is enabled.
 - `rejected`: received a 404 from a controlled verification request; never public.
 - `stale`: model was absent from the latest successful discovery response;
   never public unless it is rediscovered and verified again.
@@ -64,8 +70,9 @@ Before adding any discovered model to the public registry:
    raw model ID.
 3. Persist only its state and sanitized error category; do not persist prompts,
    responses, headers, tokens, or auth metadata.
-4. Promote only `verified` models and ensure a remote `models.json` refresh
-   cannot erase them.
+4. Enable `expose-verified` after the canary when automatic publication is
+   desired. Newly rolled-out raw IDs are then discovered, verified, and listed
+   automatically without a manual model alias.
 5. Deploy a pinned image digest only after the candidate canary passes.
 
 No static alias such as `gemini-3.7-flash` should be published until its raw

@@ -66,26 +66,30 @@ type StartOptions struct {
 
 // DiscoveredModel contains upstream model metadata that is safe to persist.
 type DiscoveredModel struct {
-	ID                  string
-	DisplayName         string
-	ContextLength       int
-	MaxCompletionTokens int
-	SupportsWebSearch   bool
+	ID                        string
+	DisplayName               string
+	ContextLength             int
+	MaxCompletionTokens       int
+	SupportsWebSearch         bool
+	AvailableAuthFingerprints []string
 }
 
 // CatalogModel is a discovered model plus its verification lifecycle state.
 type CatalogModel struct {
-	ID                      string            `json:"id"`
-	DisplayName             string            `json:"display_name"`
-	ContextLength           int               `json:"context_length,omitempty"`
-	MaxCompletionTokens     int               `json:"max_completion_tokens,omitempty"`
-	SupportsWebSearch       bool              `json:"supports_web_search,omitempty"`
-	State                   VerificationState `json:"state"`
-	LastSeenAt              time.Time         `json:"last_seen_at"`
-	LastVerifiedAt          time.Time         `json:"last_verified_at,omitempty"`
-	LastRejectedAt          time.Time         `json:"last_rejected_at,omitempty"`
-	VerificationError       string            `json:"verification_error,omitempty"`
-	VerifiedAuthFingerprint string            `json:"verified_auth_fingerprint,omitempty"`
+	ID                              string            `json:"id"`
+	DisplayName                     string            `json:"display_name"`
+	ContextLength                   int               `json:"context_length,omitempty"`
+	MaxCompletionTokens             int               `json:"max_completion_tokens,omitempty"`
+	SupportsWebSearch               bool              `json:"supports_web_search,omitempty"`
+	State                           VerificationState `json:"state"`
+	LastSeenAt                      time.Time         `json:"last_seen_at"`
+	LastVerifiedAt                  time.Time         `json:"last_verified_at,omitempty"`
+	LastRejectedAt                  time.Time         `json:"last_rejected_at,omitempty"`
+	VerificationError               string            `json:"verification_error,omitempty"`
+	AvailableAuthFingerprints       []string          `json:"available_auth_fingerprints,omitempty"`
+	LastVerificationAuthFingerprint string            `json:"last_verification_auth_fingerprint,omitempty"`
+	RejectedAuthFingerprints        []string          `json:"rejected_auth_fingerprints,omitempty"`
+	VerifiedAuthFingerprint         string            `json:"verified_auth_fingerprint,omitempty"`
 }
 
 // Snapshot contains the redacted local catalog state.
@@ -239,20 +243,20 @@ func (s *catalogService) refresh(pContext context.Context) {
 	}
 	previousModels := append([]CatalogModel(nil), snapshot.Models...)
 	snapshot.LastAttemptAt = s.now().UTC()
-	auth, errAuth := s.loadAuth(pContext)
+	auths, errAuth := s.loadAuths(pContext)
 	if errAuth != nil {
 		s.saveFailure(snapshot, errAuth)
 		return
 	}
-	models, errFetch := s.fetcher.Fetch(pContext, auth)
+	fetchResult, errFetch := s.fetchModels(pContext, auths)
 	if errFetch != nil {
 		s.saveFailure(snapshot, errFetch)
 		return
 	}
 	now := s.now().UTC()
-	snapshot.Models = mergeModels(snapshot.Models, models, now)
+	snapshot.Models = mergeModels(snapshot.Models, fetchResult.models, fetchResult.unavailableAuthFingerprints, now)
 	if s.settings.verifyEnabled {
-		s.verifyPendingModels(pContext, &snapshot, auth, now)
+		s.verifyPendingModels(pContext, &snapshot, auths, now)
 	}
 	snapshot.LastSuccessfulAt = s.now().UTC()
 	snapshot.LastError = ""
@@ -263,21 +267,62 @@ func (s *catalogService) refresh(pContext context.Context) {
 	if hasEffectiveModelChange(previousModels, snapshot.Models) {
 		registry.NotifyModelRefresh([]string{ANTIGRAVITY_PROVIDER})
 	}
-	log.WithField("model_count", len(models)).Info("Codexs Antigravity model discovery completed")
+	log.WithField("model_count", len(fetchResult.models)).Info("Codexs Antigravity model discovery completed")
 }
 
-func (s *catalogService) verifyPendingModels(pContext context.Context, pSnapshot *Snapshot, pAuth *coreauth.Auth, pNow time.Time) {
-	if pSnapshot == nil || pAuth == nil {
+func (s *catalogService) verifyPendingModels(pContext context.Context, pSnapshot *Snapshot, pAuths []*coreauth.Auth, pNow time.Time) {
+	if pSnapshot == nil {
 		return
 	}
-	verifiedAuthFingerprint := AuthFingerprint(pAuth)
+	authsByFingerprint := indexAuthsByFingerprint(pAuths)
 	for index, model := range pendingModelsForVerification(pSnapshot.Models) {
 		if index >= s.settings.maxVerificationsPerRun {
 			return
 		}
-		errVerify := s.verifier.Verify(pContext, s.settings.config, pAuth, model.ID)
-		updateVerificationResult(model, verifiedAuthFingerprint, pNow, errVerify)
+		auth, fingerprint := selectVerificationAuth(model, authsByFingerprint)
+		if auth == nil {
+			continue
+		}
+		errVerify := s.verifier.Verify(pContext, s.settings.config, auth, model.ID)
+		updateVerificationResult(model, fingerprint, pNow, errVerify)
 	}
+}
+
+func indexAuthsByFingerprint(pAuths []*coreauth.Auth) map[string]*coreauth.Auth {
+	authsByFingerprint := make(map[string]*coreauth.Auth, len(pAuths))
+	for _, auth := range pAuths {
+		fingerprint := AuthFingerprint(auth)
+		if fingerprint != "" {
+			authsByFingerprint[fingerprint] = auth
+		}
+	}
+	return authsByFingerprint
+}
+
+func selectVerificationAuth(pModel *CatalogModel, pAuthsByFingerprint map[string]*coreauth.Auth) (*coreauth.Auth, string) {
+	if pModel == nil {
+		return nil, ""
+	}
+	for _, fingerprint := range pModel.AvailableAuthFingerprints {
+		if containsString(pModel.RejectedAuthFingerprints, fingerprint) {
+			continue
+		}
+		if fingerprint == pModel.LastVerificationAuthFingerprint {
+			continue
+		}
+		if auth := pAuthsByFingerprint[fingerprint]; auth != nil {
+			return auth, fingerprint
+		}
+	}
+	for _, fingerprint := range pModel.AvailableAuthFingerprints {
+		if containsString(pModel.RejectedAuthFingerprints, fingerprint) {
+			continue
+		}
+		if auth := pAuthsByFingerprint[fingerprint]; auth != nil {
+			return auth, fingerprint
+		}
+	}
+	return nil, ""
 }
 
 func pendingModelsForVerification(pModels []CatalogModel) []*CatalogModel {
@@ -301,6 +346,7 @@ func updateVerificationResult(pModel *CatalogModel, pAuthFingerprint string, pNo
 	if pModel == nil {
 		return
 	}
+	pModel.LastVerificationAuthFingerprint = pAuthFingerprint
 	if pError == nil {
 		pModel.State = VerificationStateVerified
 		pModel.LastVerifiedAt = pNow
@@ -310,6 +356,11 @@ func updateVerificationResult(pModel *CatalogModel, pAuthFingerprint string, pNo
 	}
 	statusError, hasStatus := pError.(interface{ StatusCode() int })
 	if hasStatus && statusError.StatusCode() == http.StatusNotFound {
+		pModel.RejectedAuthFingerprints = uniqueSortedStrings(append(pModel.RejectedAuthFingerprints, pAuthFingerprint))
+		if hasRemainingVerificationAuth(pModel) {
+			pModel.VerificationError = "verification unavailable"
+			return
+		}
 		pModel.State = VerificationStateRejected
 		pModel.LastRejectedAt = pNow
 		pModel.VerifiedAuthFingerprint = ""
@@ -327,17 +378,113 @@ func (s *catalogService) saveFailure(pSnapshot Snapshot, pCause error) {
 	log.WithError(pCause).Warn("Codexs Antigravity model discovery failed")
 }
 
-func (s *catalogService) loadAuth(pContext context.Context) (*coreauth.Auth, error) {
+func (s *catalogService) loadAuths(pContext context.Context) ([]*coreauth.Auth, error) {
 	auths, errLoad := s.authLoader.Load(pContext, s.settings.authDirectory)
 	if errLoad != nil {
 		return nil, fmt.Errorf("load Antigravity credentials: %w", errLoad)
 	}
+	usableAuths := make([]*coreauth.Auth, 0, len(auths))
 	for _, auth := range auths {
 		if isUsableAntigravityAuth(auth) {
-			return auth, nil
+			usableAuths = append(usableAuths, auth)
 		}
 	}
-	return nil, fmt.Errorf("no enabled Antigravity credential with an access token is available")
+	if len(usableAuths) == 0 {
+		return nil, fmt.Errorf("no enabled Antigravity credential with an access token is available")
+	}
+	sort.Slice(usableAuths, func(pLeft, pRight int) bool {
+		return AuthFingerprint(usableAuths[pLeft]) < AuthFingerprint(usableAuths[pRight])
+	})
+	return usableAuths, nil
+}
+
+type fetchResult struct {
+	models                      []DiscoveredModel
+	unavailableAuthFingerprints map[string]struct{}
+}
+
+func (s *catalogService) fetchModels(pContext context.Context, pAuths []*coreauth.Auth) (fetchResult, error) {
+	modelsByID := make(map[string]DiscoveredModel)
+	unavailableAuthFingerprints := make(map[string]struct{})
+	successfulFetches := 0
+	for _, auth := range pAuths {
+		authFingerprint := AuthFingerprint(auth)
+		models, errFetch := s.fetcher.Fetch(pContext, auth)
+		if errFetch != nil {
+			unavailableAuthFingerprints[authFingerprint] = struct{}{}
+			log.WithError(errFetch).WithField("auth_fingerprint", authFingerprint).Warn("Codexs Antigravity catalog fetch unavailable")
+			continue
+		}
+		successfulFetches++
+		mergeFetchedModels(modelsByID, models, authFingerprint)
+	}
+	if successfulFetches == 0 {
+		return fetchResult{}, fmt.Errorf("Antigravity model catalog could not be fetched from any credential")
+	}
+	models := make([]DiscoveredModel, 0, len(modelsByID))
+	for _, model := range modelsByID {
+		model.AvailableAuthFingerprints = uniqueSortedStrings(model.AvailableAuthFingerprints)
+		models = append(models, model)
+	}
+	sort.Slice(models, func(pLeft, pRight int) bool {
+		return models[pLeft].ID < models[pRight].ID
+	})
+	return fetchResult{models: models, unavailableAuthFingerprints: unavailableAuthFingerprints}, nil
+}
+
+func mergeFetchedModels(pModelsByID map[string]DiscoveredModel, pModels []DiscoveredModel, pAuthFingerprint string) {
+	if pAuthFingerprint == "" {
+		return
+	}
+	for _, fetchedModel := range pModels {
+		modelID := strings.TrimSpace(fetchedModel.ID)
+		if modelID == "" {
+			continue
+		}
+		existingModel, exists := pModelsByID[modelID]
+		if !exists {
+			existingModel = fetchedModel
+		}
+		existingModel.AvailableAuthFingerprints = append(existingModel.AvailableAuthFingerprints, pAuthFingerprint)
+		pModelsByID[modelID] = existingModel
+	}
+}
+
+func uniqueSortedStrings(pValues []string) []string {
+	values := make(map[string]struct{}, len(pValues))
+	for _, value := range pValues {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			values[value] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func containsString(pValues []string, pValue string) bool {
+	for _, value := range pValues {
+		if value == pValue {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRemainingVerificationAuth(pModel *CatalogModel) bool {
+	if pModel == nil {
+		return false
+	}
+	for _, fingerprint := range pModel.AvailableAuthFingerprints {
+		if !containsString(pModel.RejectedAuthFingerprints, fingerprint) {
+			return true
+		}
+	}
+	return false
 }
 
 func (fileAuthLoader) Load(pContext context.Context, pDirectory string) ([]*coreauth.Auth, error) {
@@ -482,7 +629,7 @@ func parseModelsResponse(pResponseBody []byte) ([]DiscoveredModel, error) {
 	return models, nil
 }
 
-func mergeModels(pExisting []CatalogModel, pDiscovered []DiscoveredModel, pNow time.Time) []CatalogModel {
+func mergeModels(pExisting []CatalogModel, pDiscovered []DiscoveredModel, pUnavailableAuthFingerprints map[string]struct{}, pNow time.Time) []CatalogModel {
 	existingModels := make(map[string]CatalogModel, len(pExisting))
 	for _, model := range pExisting {
 		existingModels[model.ID] = model
@@ -498,6 +645,13 @@ func mergeModels(pExisting []CatalogModel, pDiscovered []DiscoveredModel, pNow t
 		model.ContextLength = discoveredModel.ContextLength
 		model.MaxCompletionTokens = discoveredModel.MaxCompletionTokens
 		model.SupportsWebSearch = discoveredModel.SupportsWebSearch
+		model.AvailableAuthFingerprints = mergeAvailableAuthFingerprints(
+			discoveredModel.AvailableAuthFingerprints,
+			model.AvailableAuthFingerprints,
+			pUnavailableAuthFingerprints,
+		)
+		model.RejectedAuthFingerprints = retainedRejectedAuthFingerprints(model.RejectedAuthFingerprints, model.AvailableAuthFingerprints)
+		resetVerificationWhenCredentialIsUnavailable(&model, pNow)
 		model.LastSeenAt = pNow
 		if model.State == VerificationStateStale {
 			model.State = VerificationStatePending
@@ -505,12 +659,18 @@ func mergeModels(pExisting []CatalogModel, pDiscovered []DiscoveredModel, pNow t
 			model.LastRejectedAt = time.Time{}
 			model.VerifiedAuthFingerprint = ""
 			model.VerificationError = ""
+			model.LastVerificationAuthFingerprint = ""
+			model.RejectedAuthFingerprints = nil
 		}
 		models = append(models, model)
 		seenModels[model.ID] = true
 	}
 	for _, model := range pExisting {
 		if seenModels[model.ID] {
+			continue
+		}
+		if hasUnavailableAuthFingerprint(model.AvailableAuthFingerprints, pUnavailableAuthFingerprints) {
+			models = append(models, model)
 			continue
 		}
 		model.State = VerificationStateStale
@@ -520,6 +680,57 @@ func mergeModels(pExisting []CatalogModel, pDiscovered []DiscoveredModel, pNow t
 		return models[pLeft].ID < models[pRight].ID
 	})
 	return models
+}
+
+func mergeAvailableAuthFingerprints(pCurrent, pPrevious []string, pUnavailableAuthFingerprints map[string]struct{}) []string {
+	availableAuthFingerprints := append([]string(nil), pCurrent...)
+	for _, fingerprint := range pPrevious {
+		if _, isUnavailable := pUnavailableAuthFingerprints[fingerprint]; isUnavailable {
+			availableAuthFingerprints = append(availableAuthFingerprints, fingerprint)
+		}
+	}
+	return uniqueSortedStrings(availableAuthFingerprints)
+}
+
+func hasUnavailableAuthFingerprint(pAvailableAuthFingerprints []string, pUnavailableAuthFingerprints map[string]struct{}) bool {
+	for _, fingerprint := range pAvailableAuthFingerprints {
+		if _, isUnavailable := pUnavailableAuthFingerprints[fingerprint]; isUnavailable {
+			return true
+		}
+	}
+	return false
+}
+
+func resetVerificationWhenCredentialIsUnavailable(pModel *CatalogModel, pNow time.Time) {
+	if pModel == nil || pModel.State != VerificationStateVerified {
+		return
+	}
+	if strings.TrimSpace(pModel.VerifiedAuthFingerprint) == "" {
+		return
+	}
+	if containsString(pModel.AvailableAuthFingerprints, pModel.VerifiedAuthFingerprint) {
+		return
+	}
+	pModel.State = VerificationStatePending
+	pModel.LastVerifiedAt = time.Time{}
+	pModel.VerifiedAuthFingerprint = ""
+	pModel.LastVerificationAuthFingerprint = ""
+	pModel.VerificationError = ""
+	if !hasRemainingVerificationAuth(pModel) {
+		pModel.State = VerificationStateRejected
+		pModel.LastRejectedAt = pNow
+		pModel.VerificationError = "model not found"
+	}
+}
+
+func retainedRejectedAuthFingerprints(pRejected, pAvailable []string) []string {
+	retained := make([]string, 0, len(pRejected))
+	for _, fingerprint := range pRejected {
+		if containsString(pAvailable, fingerprint) {
+			retained = append(retained, fingerprint)
+		}
+	}
+	return uniqueSortedStrings(retained)
 }
 
 func hasEffectiveModelChange(pBefore, pAfter []CatalogModel) bool {

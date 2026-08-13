@@ -22,6 +22,23 @@ func (f staticFetcher) Fetch(_ context.Context, _ *coreauth.Auth) ([]DiscoveredM
 	return f.models, f.err
 }
 
+type fetchResponse struct {
+	models []DiscoveredModel
+	err    error
+}
+
+type perAuthFetcher struct {
+	responses map[string]fetchResponse
+}
+
+func (f perAuthFetcher) Fetch(_ context.Context, pAuth *coreauth.Auth) ([]DiscoveredModel, error) {
+	response, exists := f.responses[AuthFingerprint(pAuth)]
+	if !exists {
+		return nil, errors.New("missing fetch response")
+	}
+	return response.models, response.err
+}
+
 type staticAuthLoader struct {
 	auths []*coreauth.Auth
 	err   error
@@ -36,12 +53,29 @@ func (v staticModelVerifier) Verify(_ context.Context, _ *config.Config, _ *core
 }
 
 type recordingModelVerifier struct {
-	verifiedModelIDs []string
+	verificationCalls []verificationCall
+	errors            map[string]error
 }
 
-func (v *recordingModelVerifier) Verify(_ context.Context, _ *config.Config, _ *coreauth.Auth, pModelID string) error {
-	v.verifiedModelIDs = append(v.verifiedModelIDs, pModelID)
-	return nil
+type verificationCall struct {
+	modelID         string
+	authFingerprint string
+}
+
+type modelNotFoundError struct{}
+
+func (modelNotFoundError) Error() string {
+	return "model not found"
+}
+
+func (modelNotFoundError) StatusCode() int {
+	return 404
+}
+
+func (v *recordingModelVerifier) Verify(_ context.Context, _ *config.Config, pAuth *coreauth.Auth, pModelID string) error {
+	authFingerprint := AuthFingerprint(pAuth)
+	v.verificationCalls = append(v.verificationCalls, verificationCall{modelID: pModelID, authFingerprint: authFingerprint})
+	return v.errors[authFingerprint+":"+pModelID]
 }
 
 func (l staticAuthLoader) Load(_ context.Context, _ string) ([]*coreauth.Auth, error) {
@@ -79,7 +113,7 @@ func TestMergeModelsPreservesVerificationAndMarksMissingModelsStale(t *testing.T
 		{ID: "gemini-new", DisplayName: "New"},
 	}
 
-	models := mergeModels(existing, discovered, now)
+	models := mergeModels(existing, discovered, map[string]struct{}{}, now)
 	states := make(map[string]VerificationState, len(models))
 	for _, model := range models {
 		states[model.ID] = model.State
@@ -213,10 +247,160 @@ func TestVerifyPendingModelsPrioritizesUntriedModels(t *testing.T) {
 		{ID: "untried-second", State: VerificationStatePending},
 	}}
 
-	service.verifyPendingModels(context.Background(), snapshot, &coreauth.Auth{ID: "auth", Provider: ANTIGRAVITY_PROVIDER}, time.Now())
+	auth := &coreauth.Auth{ID: "auth", Provider: ANTIGRAVITY_PROVIDER}
+	snapshot.Models[0].AvailableAuthFingerprints = []string{AuthFingerprint(auth)}
+	snapshot.Models[1].AvailableAuthFingerprints = []string{AuthFingerprint(auth)}
+	service.verifyPendingModels(context.Background(), snapshot, []*coreauth.Auth{auth}, time.Now())
 
-	if len(verifier.verifiedModelIDs) != 1 || verifier.verifiedModelIDs[0] != "untried-second" {
-		t.Fatalf("verified models = %v, want untried-second", verifier.verifiedModelIDs)
+	if len(verifier.verificationCalls) != 1 || verifier.verificationCalls[0].modelID != "untried-second" {
+		t.Fatalf("verified models = %v, want untried-second", verifier.verificationCalls)
+	}
+}
+
+func TestRefreshMergesModelsAcrossCredentials(t *testing.T) {
+	temporaryDirectory := t.TempDir()
+	authA := &coreauth.Auth{ID: "auth-a", Provider: ANTIGRAVITY_PROVIDER, Metadata: map[string]interface{}{"access_token": "token-a"}}
+	authB := &coreauth.Auth{ID: "auth-b", Provider: ANTIGRAVITY_PROVIDER, Metadata: map[string]interface{}{"access_token": "token-b"}}
+	service := catalogService{
+		settings: catalogSettings{snapshotPath: filepath.Join(temporaryDirectory, "catalog.json")},
+		fetcher: perAuthFetcher{responses: map[string]fetchResponse{
+			AuthFingerprint(authA): {models: []DiscoveredModel{{ID: "gemini-a"}}},
+			AuthFingerprint(authB): {models: []DiscoveredModel{{ID: "gemini-b"}}},
+		}},
+		authLoader: staticAuthLoader{auths: []*coreauth.Auth{authA, authB}},
+		store:      snapshotStore{path: filepath.Join(temporaryDirectory, "catalog.json")},
+		now:        time.Now,
+	}
+
+	service.refresh(context.Background())
+	snapshot, errLoad := service.store.load()
+	if errLoad != nil {
+		t.Fatalf("load snapshot: %v", errLoad)
+	}
+	if len(snapshot.Models) != 2 {
+		t.Fatalf("model count = %d, want 2", len(snapshot.Models))
+	}
+	if snapshot.Models[0].ID != "gemini-a" || snapshot.Models[0].AvailableAuthFingerprints[0] != AuthFingerprint(authA) {
+		t.Fatalf("first model = %+v", snapshot.Models[0])
+	}
+	if snapshot.Models[1].ID != "gemini-b" || snapshot.Models[1].AvailableAuthFingerprints[0] != AuthFingerprint(authB) {
+		t.Fatalf("second model = %+v", snapshot.Models[1])
+	}
+}
+
+func TestRefreshRetainsModelWhenItsCredentialFetchIsUnavailable(t *testing.T) {
+	temporaryDirectory := t.TempDir()
+	snapshotPath := filepath.Join(temporaryDirectory, "catalog.json")
+	authA := &coreauth.Auth{ID: "auth-a", Provider: ANTIGRAVITY_PROVIDER, Metadata: map[string]interface{}{"access_token": "token-a"}}
+	authB := &coreauth.Auth{ID: "auth-b", Provider: ANTIGRAVITY_PROVIDER, Metadata: map[string]interface{}{"access_token": "token-b"}}
+	store := snapshotStore{path: snapshotPath}
+	existing := Snapshot{Version: MODEL_CATALOG_VERSION, Models: []CatalogModel{{
+		ID:                        "gemini-new",
+		State:                     VerificationStateVerified,
+		VerifiedAuthFingerprint:   AuthFingerprint(authB),
+		AvailableAuthFingerprints: []string{AuthFingerprint(authB)},
+	}}}
+	if errSave := store.save(existing); errSave != nil {
+		t.Fatalf("save fixture snapshot: %v", errSave)
+	}
+	service := catalogService{
+		settings: catalogSettings{snapshotPath: snapshotPath},
+		fetcher: perAuthFetcher{responses: map[string]fetchResponse{
+			AuthFingerprint(authA): {models: []DiscoveredModel{{ID: "gemini-other"}}},
+			AuthFingerprint(authB): {err: errors.New("temporary upstream error")},
+		}},
+		authLoader: staticAuthLoader{auths: []*coreauth.Auth{authA, authB}},
+		store:      store,
+		now:        time.Now,
+	}
+
+	service.refresh(context.Background())
+	snapshot, errLoad := store.load()
+	if errLoad != nil {
+		t.Fatalf("load snapshot: %v", errLoad)
+	}
+	for _, model := range snapshot.Models {
+		if model.ID == "gemini-new" && model.State == VerificationStateVerified {
+			return
+		}
+	}
+	t.Fatalf("snapshot models = %+v, want verified gemini-new retained", snapshot.Models)
+}
+
+func TestMergeModelsRequiresReverificationWhenVerifiedCredentialStopsAdvertising(t *testing.T) {
+	authA := &coreauth.Auth{ID: "auth-a", Provider: ANTIGRAVITY_PROVIDER}
+	authB := &coreauth.Auth{ID: "auth-b", Provider: ANTIGRAVITY_PROVIDER}
+	models := mergeModels(
+		[]CatalogModel{{
+			ID:                        "gemini-new",
+			State:                     VerificationStateVerified,
+			AvailableAuthFingerprints: []string{AuthFingerprint(authA), AuthFingerprint(authB)},
+			VerifiedAuthFingerprint:   AuthFingerprint(authB),
+		}},
+		[]DiscoveredModel{{
+			ID:                        "gemini-new",
+			AvailableAuthFingerprints: []string{AuthFingerprint(authA)},
+		}},
+		map[string]struct{}{},
+		time.Now(),
+	)
+	if len(models) != 1 || models[0].State != VerificationStatePending {
+		t.Fatalf("models = %+v, want pending model", models)
+	}
+	if models[0].VerifiedAuthFingerprint != "" {
+		t.Fatalf("verified auth fingerprint = %q, want empty", models[0].VerifiedAuthFingerprint)
+	}
+}
+
+func TestVerifyPendingModelsTriesAnotherCredentialAfterNotFound(t *testing.T) {
+	authA := &coreauth.Auth{ID: "auth-a", Provider: ANTIGRAVITY_PROVIDER}
+	authB := &coreauth.Auth{ID: "auth-b", Provider: ANTIGRAVITY_PROVIDER}
+	authFingerprints := uniqueSortedStrings([]string{AuthFingerprint(authA), AuthFingerprint(authB)})
+	firstFingerprint := authFingerprints[0]
+	secondFingerprint := authFingerprints[1]
+	verifier := &recordingModelVerifier{errors: map[string]error{
+		firstFingerprint + ":gemini-new": modelNotFoundError{},
+	}}
+	service := catalogService{settings: catalogSettings{maxVerificationsPerRun: 1}, verifier: verifier}
+	snapshot := &Snapshot{Models: []CatalogModel{{
+		ID:                        "gemini-new",
+		State:                     VerificationStatePending,
+		AvailableAuthFingerprints: authFingerprints,
+	}}}
+
+	service.verifyPendingModels(context.Background(), snapshot, []*coreauth.Auth{authA, authB}, time.Now())
+	if snapshot.Models[0].State != VerificationStatePending {
+		t.Fatalf("state after first verification = %s, want pending", snapshot.Models[0].State)
+	}
+	service.verifyPendingModels(context.Background(), snapshot, []*coreauth.Auth{authA, authB}, time.Now())
+	if snapshot.Models[0].State != VerificationStateVerified {
+		t.Fatalf("state after second verification = %s, want verified", snapshot.Models[0].State)
+	}
+	if len(verifier.verificationCalls) != 2 || verifier.verificationCalls[1].authFingerprint != secondFingerprint {
+		t.Fatalf("verification calls = %+v, want second credential", verifier.verificationCalls)
+	}
+}
+
+func TestLoadVerifiedModelsUsesSuccessfulCredentialOnly(t *testing.T) {
+	temporaryDirectory := t.TempDir()
+	snapshotPath := filepath.Join(temporaryDirectory, "catalog.json")
+	authA := &coreauth.Auth{ID: "auth-a", Provider: ANTIGRAVITY_PROVIDER}
+	authB := &coreauth.Auth{ID: "auth-b", Provider: ANTIGRAVITY_PROVIDER}
+	store := snapshotStore{path: snapshotPath}
+	fixture := Snapshot{Version: MODEL_CATALOG_VERSION, Models: []CatalogModel{{
+		ID:                        "gemini-new",
+		State:                     VerificationStateVerified,
+		AvailableAuthFingerprints: []string{AuthFingerprint(authA), AuthFingerprint(authB)},
+		VerifiedAuthFingerprint:   AuthFingerprint(authB),
+	}}}
+	if errSave := store.save(fixture); errSave != nil {
+		t.Fatalf("save fixture snapshot: %v", errSave)
+	}
+	if models := LoadVerifiedModels(snapshotPath, authA); len(models) != 0 {
+		t.Fatalf("models for unverified credential = %+v, want none", models)
+	}
+	if models := LoadVerifiedModels(snapshotPath, authB); len(models) != 1 || models[0].ID != "gemini-new" {
+		t.Fatalf("models for verified credential = %+v", models)
 	}
 }
 
