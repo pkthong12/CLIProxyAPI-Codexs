@@ -543,8 +543,7 @@ type FunctionCallGroup struct {
 func parseFunctionResponseRaw(response gjson.Result, fallbackName string) string {
 	if response.IsObject() && gjson.Valid(response.Raw) {
 		raw := response.Raw
-		name := response.Get("functionResponse.name").String()
-		if strings.TrimSpace(name) == "" && fallbackName != "" {
+		if fallbackName != "" {
 			updated, _ := sjson.SetBytes([]byte(raw), "functionResponse.name", fallbackName)
 			raw = string(updated)
 		}

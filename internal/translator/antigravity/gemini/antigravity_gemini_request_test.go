@@ -520,6 +520,38 @@ func TestFixCLIToolResponse_PreservesExistingName(t *testing.T) {
 	}
 }
 
+func TestFixCLIToolResponse_AlignsMismatchedResponseNameWithCall(t *testing.T) {
+	input := `{
+		"model": "gemini-3-pro-preview",
+		"request": {
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{"functionCall": {"name": "Read", "args": {}}}
+					]
+				},
+				{
+					"role": "function",
+					"parts": [
+						{"functionResponse": {"name": "unknown", "response": {"result": "file content"}}}
+					]
+				}
+			]
+		}
+	}`
+
+	result, err := fixCLIToolResponse([]byte(input))
+	if err != nil {
+		t.Fatalf("fixCLIToolResponse failed: %v", err)
+	}
+
+	name := gjson.GetBytes(result, "request.contents.1.parts.0.functionResponse.name").String()
+	if name != "Read" {
+		t.Errorf("Expected response name to match call name Read, got %q", name)
+	}
+}
+
 func TestFixCLIToolResponse_MoreResponsesThanCalls(t *testing.T) {
 	// If there are more function responses than calls, unmatched extras are discarded by grouping.
 	input := `{
