@@ -431,6 +431,80 @@ func TestLoadVerifiedModelsFiltersByCredentialFingerprint(t *testing.T) {
 	}
 }
 
+func TestAuthFingerprintIgnoresFileName(t *testing.T) {
+	catalogAuth := &coreauth.Auth{
+		ID:       "antigravity-account.json",
+		Provider: ANTIGRAVITY_PROVIDER,
+		FileName: "antigravity-account.json",
+	}
+	watcherAuth := catalogAuth.Clone()
+	watcherAuth.FileName = ""
+
+	if AuthFingerprint(catalogAuth) != AuthFingerprint(watcherAuth) {
+		t.Fatal("auth fingerprint changed when only FileName changed")
+	}
+}
+
+func TestLoadVerifiedModelsAcceptsLegacyFileNameFingerprint(t *testing.T) {
+	temporaryDirectory := t.TempDir()
+	snapshotPath := filepath.Join(temporaryDirectory, "catalog.json")
+	catalogAuth := &coreauth.Auth{
+		ID:       "antigravity-account.json",
+		Provider: ANTIGRAVITY_PROVIDER,
+		FileName: "antigravity-account.json",
+	}
+	watcherAuth := catalogAuth.Clone()
+	watcherAuth.FileName = ""
+	store := snapshotStore{path: snapshotPath}
+	fixture := Snapshot{
+		Version: MODEL_CATALOG_VERSION,
+		Models: []CatalogModel{{
+			ID:                      "gemini-3.7-flash-medium",
+			State:                   VerificationStateVerified,
+			VerifiedAuthFingerprint: legacyAuthFingerprint(catalogAuth),
+		}},
+	}
+	if errSave := store.save(fixture); errSave != nil {
+		t.Fatalf("save fixture snapshot: %v", errSave)
+	}
+
+	models := LoadVerifiedModels(snapshotPath, watcherAuth)
+	if len(models) != 1 || models[0].ID != "gemini-3.7-flash-medium" {
+		t.Fatalf("legacy verified models = %+v", models)
+	}
+}
+
+func TestNormalizeSnapshotAuthFingerprintsMigratesLegacyFingerprints(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "antigravity-account.json",
+		Provider: ANTIGRAVITY_PROVIDER,
+		FileName: "antigravity-account.json",
+	}
+	legacyFingerprint := legacyAuthFingerprint(auth)
+	currentFingerprint := AuthFingerprint(auth)
+	snapshot := Snapshot{Models: []CatalogModel{{
+		AvailableAuthFingerprints:       []string{legacyFingerprint},
+		RejectedAuthFingerprints:        []string{legacyFingerprint},
+		LastVerificationAuthFingerprint: legacyFingerprint,
+		VerifiedAuthFingerprint:         legacyFingerprint,
+	}}}
+
+	normalizeSnapshotAuthFingerprints(&snapshot, []*coreauth.Auth{auth})
+	model := snapshot.Models[0]
+	if model.VerifiedAuthFingerprint != currentFingerprint {
+		t.Fatalf("verified fingerprint = %q, want %q", model.VerifiedAuthFingerprint, currentFingerprint)
+	}
+	if model.LastVerificationAuthFingerprint != currentFingerprint {
+		t.Fatalf("last verification fingerprint = %q, want %q", model.LastVerificationAuthFingerprint, currentFingerprint)
+	}
+	if len(model.AvailableAuthFingerprints) != 1 || model.AvailableAuthFingerprints[0] != currentFingerprint {
+		t.Fatalf("available fingerprints = %v", model.AvailableAuthFingerprints)
+	}
+	if len(model.RejectedAuthFingerprints) != 1 || model.RejectedAuthFingerprints[0] != currentFingerprint {
+		t.Fatalf("rejected fingerprints = %v", model.RejectedAuthFingerprints)
+	}
+}
+
 func TestParseSettingsRejectsInvalidIntervals(t *testing.T) {
 	_, errSettings := parseSettings(StartOptions{AuthDirectory: t.TempDir(), RefreshInterval: "invalid", BaseDirectory: t.TempDir()})
 	if errSettings == nil {

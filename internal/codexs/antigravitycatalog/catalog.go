@@ -248,6 +248,7 @@ func (s *catalogService) refresh(pContext context.Context) {
 		s.saveFailure(snapshot, errAuth)
 		return
 	}
+	normalizeSnapshotAuthFingerprints(&snapshot, auths)
 	fetchResult, errFetch := s.fetchModels(pContext, auths)
 	if errFetch != nil {
 		s.saveFailure(snapshot, errFetch)
@@ -733,6 +734,45 @@ func retainedRejectedAuthFingerprints(pRejected, pAvailable []string) []string {
 	return uniqueSortedStrings(retained)
 }
 
+func normalizeSnapshotAuthFingerprints(pSnapshot *Snapshot, pAuths []*coreauth.Auth) {
+	if pSnapshot == nil || len(pSnapshot.Models) == 0 || len(pAuths) == 0 {
+		return
+	}
+	fingerprints := make(map[string]string, len(pAuths))
+	for _, auth := range pAuths {
+		legacyFingerprint := legacyAuthFingerprint(auth)
+		currentFingerprint := AuthFingerprint(auth)
+		if legacyFingerprint != "" && currentFingerprint != "" {
+			fingerprints[legacyFingerprint] = currentFingerprint
+		}
+	}
+	for index := range pSnapshot.Models {
+		model := &pSnapshot.Models[index]
+		model.AvailableAuthFingerprints = normalizeFingerprints(model.AvailableAuthFingerprints, fingerprints)
+		model.RejectedAuthFingerprints = normalizeFingerprints(model.RejectedAuthFingerprints, fingerprints)
+		model.LastVerificationAuthFingerprint = normalizeFingerprint(model.LastVerificationAuthFingerprint, fingerprints)
+		model.VerifiedAuthFingerprint = normalizeFingerprint(model.VerifiedAuthFingerprint, fingerprints)
+	}
+}
+
+func normalizeFingerprints(pFingerprints []string, pMappings map[string]string) []string {
+	if len(pFingerprints) == 0 || len(pMappings) == 0 {
+		return pFingerprints
+	}
+	result := make([]string, 0, len(pFingerprints))
+	for _, fingerprint := range pFingerprints {
+		result = append(result, normalizeFingerprint(fingerprint, pMappings))
+	}
+	return uniqueSortedStrings(result)
+}
+
+func normalizeFingerprint(pFingerprint string, pMappings map[string]string) string {
+	if replacement, exists := pMappings[pFingerprint]; exists {
+		return replacement
+	}
+	return pFingerprint
+}
+
 func hasEffectiveModelChange(pBefore, pAfter []CatalogModel) bool {
 	if len(pBefore) != len(pAfter) {
 		return true
@@ -758,19 +798,47 @@ func AuthFingerprint(pAuth *coreauth.Auth) string {
 	identity := strings.Join([]string{
 		strings.ToLower(strings.TrimSpace(pAuth.Provider)),
 		strings.TrimSpace(pAuth.ID),
-		strings.TrimSpace(pAuth.FileName),
+	}, "|")
+	if identity == "|" {
+		return ""
+	}
+	return fingerprintIdentity(identity)
+}
+
+func legacyAuthFingerprint(pAuth *coreauth.Auth) string {
+	if pAuth == nil {
+		return ""
+	}
+	fileName := strings.TrimSpace(pAuth.FileName)
+	if fileName == "" {
+		fileName = strings.TrimSpace(pAuth.ID)
+	}
+	identity := strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(pAuth.Provider)),
+		strings.TrimSpace(pAuth.ID),
+		fileName,
 	}, "|")
 	if identity == "||" {
 		return ""
 	}
-	digest := sha256.Sum256([]byte(identity))
+	return fingerprintIdentity(identity)
+}
+
+func fingerprintIdentity(pIdentity string) string {
+	digest := sha256.Sum256([]byte(pIdentity))
 	return hex.EncodeToString(digest[:])
+}
+
+func authFingerprintMatches(pStoredFingerprint string, pAuth *coreauth.Auth) bool {
+	if pStoredFingerprint == "" || pAuth == nil {
+		return false
+	}
+	return pStoredFingerprint == AuthFingerprint(pAuth) || pStoredFingerprint == legacyAuthFingerprint(pAuth)
 }
 
 // LoadVerifiedModels returns only models verified with the supplied credential.
 func LoadVerifiedModels(pSnapshotPath string, pAuth *coreauth.Auth) []DiscoveredModel {
-	fingerprint := AuthFingerprint(pAuth)
-	if fingerprint == "" {
+	if AuthFingerprint(pAuth) == "" {
 		return nil
 	}
 	snapshot, errLoad := (snapshotStore{path: pSnapshotPath}).load()
@@ -779,7 +847,7 @@ func LoadVerifiedModels(pSnapshotPath string, pAuth *coreauth.Auth) []Discovered
 	}
 	models := make([]DiscoveredModel, 0, len(snapshot.Models))
 	for _, model := range snapshot.Models {
-		if model.State != VerificationStateVerified || model.VerifiedAuthFingerprint != fingerprint {
+		if model.State != VerificationStateVerified || !authFingerprintMatches(model.VerifiedAuthFingerprint, pAuth) {
 			continue
 		}
 		models = append(models, DiscoveredModel{
