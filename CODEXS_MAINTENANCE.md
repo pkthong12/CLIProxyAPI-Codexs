@@ -35,3 +35,32 @@ The candidate image must also pass `scripts/codexs-canary.sh` on the VPS before 
 ## Secrets
 
 Never commit API keys, OAuth tokens, auth JSON files, deployment configuration, or production hostnames. Canary credentials are mounted read-only and canary state is always stored in an isolated writable directory.
+
+## Client API key safety
+
+Client API keys are enforced by CLIProxy's api-keys list in the deployed
+config.local.yaml. CPAMP stores management, analytics, and API-key alias data,
+but it does not independently authorize requests to /v1/*.
+
+Before a CLIProxy image or deployment configuration change:
+
+1. Create a timestamped backup of the deployed config.local.yaml.
+2. Record only the count and SHA-256 fingerprints of configured client keys;
+   never place plaintext keys in logs, tickets, commits, or shell history.
+3. After the container reloads, test each required client key against
+   GET /v1/models and verify its required model IDs are present.
+4. Run one minimal POST /v1/chat/completions request with a non-production
+   prompt for any key whose provider route must be confirmed.
+
+If a previously valid key returns 401 Invalid API key:
+
+1. Check whether its SHA-256 fingerprint is present in the deployed api-keys
+   list. This failure occurs before provider routing.
+2. Do not change providers, model routing, Nginx, CPAMP, or unrelated keys.
+3. Restore only the missing key from the approved secret source, retaining a
+   timestamped configuration backup first.
+4. Wait for CLIProxy's configuration watcher to reload, then repeat the two
+   API checks above and confirm all production containers remain running.
+
+Treat any key copied into chat, screenshots, terminal history, or logs as
+exposed: create a replacement key and revoke the exposed key after recovery.

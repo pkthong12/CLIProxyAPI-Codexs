@@ -331,6 +331,19 @@ func (s *Service) completeModelRegistrationForAuthWithCache(ctx context.Context,
 	s.coreManager.RefreshSchedulerEntry(auth.ID)
 }
 
+func (s *Service) registerStoredAuthModels(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	storedAuths := make([]*coreauth.Auth, 0)
+	for _, auth := range s.coreManager.List() {
+		if auth != nil && !coreauth.IsConfigAPIKeyAuth(auth) {
+			storedAuths = append(storedAuths, auth)
+		}
+	}
+	s.registerModelsForAuthBatch(ctx, storedAuths)
+}
+
 func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	if s == nil || id == "" {
 		return
