@@ -36,6 +36,20 @@ The candidate image must also pass `scripts/codexs-canary.sh` on the VPS before 
 
 Never commit API keys, OAuth tokens, auth JSON files, deployment configuration, or production hostnames. Canary credentials are mounted read-only and canary state is always stored in an isolated writable directory.
 
+## Antigravity catalog identity
+
+Verified Antigravity catalog models are bound to the stable `provider + auth ID`
+identity. Do not use `Auth.FileName` as part of that identity: the file token
+store populates it while watcher-synthesized auth updates can omit it for the
+same credential. Including it causes a late watcher registration to remove
+verified models such as `gemini-3.7-flash-low` and
+`gemini-3.7-flash-medium`.
+
+Catalog startup migrates legacy snapshot fingerprints before discovery. Keep
+the legacy-read compatibility path until all active deployment snapshots have
+been rewritten. Any identity change requires regression coverage for both a
+file-store auth and a watcher auth with the same ID but different `FileName`.
+
 ## Client API key safety
 
 Client API keys are enforced by CLIProxy's api-keys list in the deployed
