@@ -78,3 +78,26 @@ If a previously valid key returns 401 Invalid API key:
 
 Treat any key copied into chat, screenshots, terminal history, or logs as
 exposed: create a replacement key and revoke the exposed key after recovery.
+
+## Antigravity Model Verification
+
+Discovery is not publication. An Antigravity model first enters the local catalog as
+`pending_verification`; it is routable only after a minimal native request marks it
+`verified` for a matching credential fingerprint. Do not advertise, alias, or set a
+newly discovered model as a client default before that state transition completes.
+
+The production catalog currently runs one verification per refresh cycle. With a one-hour
+refresh interval, multiple newly discovered models can remain pending for multiple hours.
+This is intentional to limit upstream quota use. For an urgent model release, verify only
+the pending models in an isolated canary using read-only production auth files and a separate
+catalog state directory; promote only the verified snapshot state, then restart only
+`cli-proxy-api` and test both OpenAI Chat Completions and Gemini native requests.
+
+Troubleshooting classification:
+
+- `unknown provider for model`: the model has no verified provider route yet; inspect the
+  catalog state before changing aliases or model lists.
+- Upstream `MODEL_NOT_FOUND` or HTTP 404 during verification: keep the candidate unexposed;
+  its discovery record is not proof that the generation endpoint accepts it.
+- Upstream HTTP 429: the route exists but the selected credential is quota-limited; do not
+  mark the model missing or change its provider mapping.
