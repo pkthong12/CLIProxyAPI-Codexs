@@ -54,7 +54,9 @@ docker run -d \
   ./CLIProxyAPI --config /CLIProxyAPI/config.yaml >/dev/null
 
 for ((attempt = 1; attempt <= STARTUP_ATTEMPTS; attempt++)); do
-  if curl --fail --silent --show-error "http://127.0.0.1:${CANARY_PORT}/v1/models" >/dev/null; then
+  if curl --fail --silent --show-error \
+    -H "Authorization: Bearer ${API_KEY}" \
+    "http://127.0.0.1:${CANARY_PORT}/v1/models" >/dev/null; then
     break
   fi
   if (( attempt == STARTUP_ATTEMPTS )); then
