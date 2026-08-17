@@ -350,6 +350,24 @@ func TestConvertOpenAIRequestToAntigravityMapsToolChoiceModes(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToAntigravityFallsBackForMixedTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages": [{"role": "user", "content": "Search and inspect local data."}],
+		"tools": [
+			{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {}}}},
+			{"type": "google_search", "google_search": {}}
+		]
+	}`)
+
+	output := ConvertOpenAIRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if gjson.GetBytes(output, "request.tools.#(googleSearch)").Exists() {
+		t.Fatalf("mixed tools must remove unsupported built-in tools. Output: %s", output)
+	}
+	if !gjson.GetBytes(output, "request.tools.0.functionDeclarations.0.name").Exists() {
+		t.Fatalf("mixed tools must retain custom functions. Output: %s", output)
+	}
+}
+
 func TestConvertOpenAIRequestToAntigravityMapsResponseFormatJSONObject(t *testing.T) {
 	inputJSON := []byte(`{
 		"model":"gemini-3.6-flash-high",

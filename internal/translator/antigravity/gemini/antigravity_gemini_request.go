@@ -48,6 +48,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.model")
 	}
 
+	rawJSON = normalizeGeminiFunctionResponseParts(rawJSON)
 	fixedJSON, errFixCLIToolResponse := fixCLIToolResponse(rawJSON)
 	if errFixCLIToolResponse != nil {
 		return []byte{}
@@ -152,6 +153,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		rawJSON = signature.SanitizeGeminiRequestThoughtSignatures(rawJSON, "request.contents")
 	}
 
+	rawJSON = common.RemoveGeminiBuiltInToolsForFunctionCompatibility(rawJSON, "request.tools")
 	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings")
 }
 
@@ -535,6 +537,109 @@ func logAntigravityClaudeGeminiSignatureSanitize(modelName, action, reason strin
 type FunctionCallGroup struct {
 	ResponsesNeeded int
 	CallNames       []string // ordered function call names for backfilling empty response names
+}
+
+// normalizeGeminiFunctionResponseParts expands invalid function response arrays into parts.
+func normalizeGeminiFunctionResponseParts(input []byte) []byte {
+	contents := util.GetGJSONBytesNoCopy(input, "request.contents")
+	if !contents.IsArray() || !hasGeminiFunctionResponsePartsToNormalize(contents) {
+		return input
+	}
+
+	contentItems := translatorcommon.NewRawArrayItems(contents.Get("#").Int())
+	contents.ForEach(func(_, content gjson.Result) bool {
+		contentItems = append(contentItems, normalizeGeminiContentFunctionResponseParts(content))
+		return true
+	})
+
+	result, _ := sjson.SetRawBytes(input, "request.contents", translatorcommon.JoinRawArray(contentItems))
+	return result
+}
+
+// hasGeminiFunctionResponsePartsToNormalize reports whether request contents contain invalid tool responses.
+func hasGeminiFunctionResponsePartsToNormalize(contents gjson.Result) bool {
+	hasInvalidResponse := false
+	contents.ForEach(func(_, content gjson.Result) bool {
+		content.Get("parts").ForEach(func(_, part gjson.Result) bool {
+			_, response := getGeminiFunctionResponseField(part)
+			hasInvalidResponse = response.Exists() && (response.IsArray() || !response.Get("response").IsObject())
+			return !hasInvalidResponse
+		})
+		return !hasInvalidResponse
+	})
+	return hasInvalidResponse
+}
+
+// normalizeGeminiContentFunctionResponseParts returns content with valid function response parts.
+func normalizeGeminiContentFunctionResponseParts(content gjson.Result) []byte {
+	parts := content.Get("parts")
+	if !content.IsObject() || !parts.IsArray() {
+		return []byte(content.Raw)
+	}
+
+	partItems := translatorcommon.NewRawArrayItems(parts.Get("#").Int())
+	parts.ForEach(func(_, part gjson.Result) bool {
+		fieldName, response := getGeminiFunctionResponseField(part)
+		appendNormalizedGeminiFunctionResponseParts(&partItems, part, fieldName, response)
+		return true
+	})
+
+	result, _ := sjson.SetRawBytes([]byte(content.Raw), "parts", translatorcommon.JoinRawArray(partItems))
+	return result
+}
+
+// appendNormalizedGeminiFunctionResponseParts appends one part for each valid function response.
+func appendNormalizedGeminiFunctionResponseParts(partItems *[][]byte, part gjson.Result, fieldName string, response gjson.Result) {
+	if !response.Exists() {
+		*partItems = append(*partItems, []byte(part.Raw))
+		return
+	}
+	if response.IsArray() {
+		response.ForEach(func(_, item gjson.Result) bool {
+			*partItems = append(*partItems, replaceGeminiFunctionResponseField(part, fieldName, item))
+			return true
+		})
+		return
+	}
+	*partItems = append(*partItems, replaceGeminiFunctionResponseField(part, fieldName, response))
+}
+
+// getGeminiFunctionResponseField returns the supported function response field and its value.
+func getGeminiFunctionResponseField(part gjson.Result) (string, gjson.Result) {
+	if response := part.Get("functionResponse"); response.Exists() {
+		return "functionResponse", response
+	}
+	return "function_response", part.Get("function_response")
+}
+
+// replaceGeminiFunctionResponseField replaces a response field while preserving other part fields.
+func replaceGeminiFunctionResponseField(part gjson.Result, fieldName string, response gjson.Result) []byte {
+	result, _ := sjson.DeleteBytes([]byte(part.Raw), fieldName)
+	if fieldName == "function_response" {
+		fieldName = "functionResponse"
+	}
+	result, _ = sjson.SetRawBytes(result, fieldName, normalizeGeminiFunctionResponse(response))
+	return result
+}
+
+// normalizeGeminiFunctionResponse ensures the response payload is an object as required by Gemini.
+func normalizeGeminiFunctionResponse(response gjson.Result) []byte {
+	if !response.IsObject() {
+		return []byte(`{"response":{"result":` + getGeminiRawValue(response) + `}}`)
+	}
+	if response.Get("response").IsObject() {
+		return []byte(response.Raw)
+	}
+	result, _ := sjson.SetRawBytes([]byte(response.Raw), "response", []byte(`{"result":`+getGeminiRawValue(response.Get("response"))+`}`))
+	return result
+}
+
+// getGeminiRawValue returns a JSON value, using null when the result is absent.
+func getGeminiRawValue(value gjson.Result) string {
+	if value.Exists() && value.Raw != "" {
+		return value.Raw
+	}
+	return "null"
 }
 
 // parseFunctionResponseRaw attempts to normalize a function response part into a JSON object string.

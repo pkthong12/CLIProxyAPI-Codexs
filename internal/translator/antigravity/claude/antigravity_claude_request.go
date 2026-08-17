@@ -924,6 +924,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out, _ = sjson.SetBytes(out, "request.generationConfig.maxOutputTokens", v.Num)
 	}
 
+	out = common.RemoveGeminiBuiltInToolsForFunctionCompatibility(out, "request.tools")
 	out = common.AttachDefaultSafetySettings(out, "request.safetySettings")
 	if sigcompat.SignatureProviderFromModelName(modelName) == sigcompat.SignatureProviderGemini {
 		out = sigcompat.SanitizeGeminiRequestThoughtSignatures(out, "request.contents")

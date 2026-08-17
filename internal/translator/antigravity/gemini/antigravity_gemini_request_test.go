@@ -738,6 +738,54 @@ func TestConvertGeminiRequestToAntigravityMapsSnakeCaseFunctionReferences(t *tes
 	}
 }
 
+func TestConvertGeminiRequestToAntigravityExpandsArrayFunctionResponses(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents":[
+			{"role":"model","parts":[
+				{"functionCall":{"name":"lookup","args":{}}},
+				{"functionCall":{"name":"lookup","args":{}}}
+			]},
+			{"role":"user","parts":[{"function_response":[
+				{"name":"lookup","response":{"result":"first"}},
+				{"name":"lookup","response":{"result":"second"}}
+			]}]}
+		]
+	}`)
+
+	output := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	parts := gjson.GetBytes(output, "request.contents.1.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("function response parts = %d, want 2. Output: %s", len(parts), output)
+	}
+	for index, part := range parts {
+		functionResponse := part.Get("functionResponse")
+		if !functionResponse.IsObject() {
+			t.Fatalf("part %d functionResponse is not an object. Output: %s", index, output)
+		}
+		if !functionResponse.Get("response").IsObject() {
+			t.Fatalf("part %d response is not an object. Output: %s", index, output)
+		}
+	}
+}
+
+func TestConvertGeminiRequestToAntigravityFallsBackForMixedTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [{"role": "user", "parts": [{"text": "Search and then inspect local data."}]}],
+		"tools": [
+			{"functionDeclarations": [{"name": "lookup", "parameters": {"type": "OBJECT", "properties": {}}}]},
+			{"googleSearch": {}}
+		]
+	}`)
+
+	output := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if gjson.GetBytes(output, "request.tools.#(googleSearch)").Exists() {
+		t.Fatalf("mixed tools must remove unsupported built-in tools. Output: %s", output)
+	}
+	if !gjson.GetBytes(output, "request.tools.0.functionDeclarations.0.name").Exists() {
+		t.Fatalf("mixed tools must retain custom functions. Output: %s", output)
+	}
+}
+
 func TestSanitizeAntigravityClaudeGeminiRequestSignatures_PreservesNumberPrecision(t *testing.T) {
 	inputJSON := []byte(`{
 		"project": "",

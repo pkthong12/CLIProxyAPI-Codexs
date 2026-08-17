@@ -428,6 +428,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if strings.Contains(strings.ToLower(modelName), "claude") {
 		out = gemini.SanitizeAntigravityClaudeGeminiRequestSignatures(modelName, out)
 	}
+	out = common.RemoveGeminiBuiltInToolsForFunctionCompatibility(out, "request.tools")
 	return common.AttachDefaultSafetySettings(out, "request.safetySettings")
 }
 
