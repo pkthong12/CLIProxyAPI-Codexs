@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Apipool Restic backup every day
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 Asia/Ho_Chi_Minh
+RandomizedDelaySec=15m
+Persistent=true
+Unit=apipool-restic-backup.service
+
+[Install]
+WantedBy=timers.target

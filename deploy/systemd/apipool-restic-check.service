@@ -1,0 +1,11 @@
+[Unit]
+Description=Verify the Apipool Restic repository
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/apipool-restic-check
+Nice=10
+IOSchedulingClass=idle
